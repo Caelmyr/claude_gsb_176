@@ -10,8 +10,10 @@ async function load() {
   document.getElementById('stats').innerHTML = [
     { label: '作业总数 Jobs', value: ov.jobs_total },
     { label: '运行中 Active', value: ov.jobs_active, cls: ov.jobs_active ? 'good' : '' },
+    { label: '等待依赖 Waiting', value: ov.jobs_waiting || 0, cls: ov.jobs_waiting ? 'warn' : '' },
     { label: '成功 Succeeded', value: ov.jobs_succeeded, cls: 'good' },
     { label: '失败 Failed', value: ov.jobs_failed, cls: ov.jobs_failed ? 'bad' : '' },
+    { label: '已跳过 Skipped', value: ov.jobs_skipped || 0, cls: ov.jobs_skipped ? 'warn' : '' },
     { label: 'Worker 存活 Alive', value: w.alive, cls: 'good' },
     { label: 'Worker 失联 Dead', value: w.dead, cls: w.dead ? 'bad' : '' },
   ].map(s => `<div class="stat"><div class="label">${s.label}</div><div class="value ${s.cls || ''}">${C.fmtNum(s.value)}</div></div>`).join('');
@@ -22,6 +24,7 @@ async function load() {
         [
           { key: 'name', label: '作业 Job' },
           { key: 'status', label: '状态 Status', render: r => C.stateBadge(r.status, true) },
+          { key: 'deps', label: '依赖 Deps', render: r => depBadge(r) },
           { key: 'stage', label: '阶段进度 Progress', render: r => stageBars(r) },
           { key: 'created_ms', label: '提交时间 Submitted', render: r => C.fmtTime(r.created_ms) },
         ],
@@ -38,6 +41,13 @@ async function load() {
           { key: 'total_tasks_completed', label: '已完成 Done', render: r => r.total_tasks_completed, num: true },
         ], w.workers)
     : C.empty();
+}
+
+function depBadge(job) {
+  const n = (job.depends_on || []).length;
+  if (!n) return '<span class="muted">无 none</span>';
+  const waiting = (job.dependencies && job.dependencies.blocking || []).length;
+  return `<span class="badge ${waiting ? 'warn' : 'good'} badge-dot">${n} · ${waiting} 等待</span>`;
 }
 
 function stageBars(job) {

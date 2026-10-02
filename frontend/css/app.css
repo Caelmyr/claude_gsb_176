@@ -194,6 +194,7 @@ code, .mono { font-family: var(--mono); font-size: 0.9em; }
 .stat .value { font-size: 26px; font-weight: 650; line-height: 1.1; }
 .stat .delta { font-size: 12px; margin-top: 4px; color: var(--muted); }
 .stat .value.good { color: var(--good); }
+.stat .value.warn { color: var(--serious); }
 .stat .value.bad { color: var(--critical); }
 
 /* ---------------------------------------------------------------------- */
@@ -372,6 +373,17 @@ fieldset legend { font-size: 13px; font-weight: 600; color: var(--ink-2); paddin
   color: var(--muted);
   padding: 36px 16px;
   font-size: 13px;
+}
+.alert {
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  font-size: 13px;
+}
+.alert.warn {
+  border-left: 3px solid var(--serious);
+  background: color-mix(in srgb, var(--serious) 9%, var(--surface));
+  color: var(--text);
 }
 .toast-host {
   position: fixed;

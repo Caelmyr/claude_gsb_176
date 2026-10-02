@@ -18,7 +18,12 @@ function setupFilters() {
 async function render() {
   if (!currentJob) return;
   try {
-    lastData = await API.get('/api/jobs/' + currentJob);
+    const [jobsData, detail] = await Promise.all([
+      API.get('/api/jobs'),
+      API.get('/api/jobs/' + currentJob),
+    ]);
+    window.ALL_JOBS = jobsData.jobs || [];
+    lastData = detail;
   } catch (e) { return; }
   const job = lastData.job;
   const tasks = lastData.tasks || [];
@@ -49,6 +54,7 @@ async function render() {
         <div>${stageBar('reduce', 'Reduce')}</div>
       </div>
     </div>`;
+  renderDependencies(job);
 
   // Tasks table
   const filtered = tasks.filter(t => !kindFilter || t.kind === kindFilter);
@@ -62,6 +68,60 @@ async function render() {
     { key: 'records_processed', label: '处理 Records', render: r => C.fmtNum(r.records_processed), num: true },
     { key: 'duration_ms', label: '耗时 Dur', render: r => C.fmtDur(r.duration_ms), num: true },
   ], filtered) : C.empty();
+}
+
+function renderDependencies(job) {
+  const d = job.dependencies || { upstream: [], downstream: [], depends_on: [], editable: false };
+  const upstream = d.upstream || [];
+  const downstream = d.downstream || [];
+  const editor = d.editable ? `
+    <div class="mt">
+      <label>修改前置作业（Ctrl/⌘ 多选；清空表示无依赖）Edit upstream jobs</label>
+      <select id="dep-edit" multiple size="5" style="min-height:120px">${depOptions(job)}</select>
+      <div class="mt flex">
+        <button class="btn small primary" id="dep-save" type="button">保存依赖 Save</button>
+        <span class="hint">仍在等待时可中途修改；已开始后为保证结果一致不可修改。</span>
+      </div>
+    </div>` : `<div class="hint mt">依赖只能在 WAITING（等待中）状态修改。</div>`;
+  const upstreamHtml = upstream.length ? C.table([
+    { key: 'name', label: '前置 Upstream', render: r => `${C.esc(r.name)}<div class="small mono">${C.esc(r.job_id)}</div>` },
+    { key: 'status', label: '状态 Status', render: r => C.stateBadge(r.status, true) },
+  ], upstream) : '<div class="empty">无前置作业 No upstream jobs</div>';
+  const downstreamHtml = downstream.length ? C.table([
+    { key: 'name', label: '后续 Downstream', render: r => `${C.esc(r.name)}<div class="small mono">${C.esc(r.job_id)}</div>` },
+    { key: 'status', label: '状态 Status', render: r => C.stateBadge(r.status, true) },
+  ], downstream) : '<div class="empty">暂无后续作业 No downstream jobs</div>';
+  document.getElementById('dependencies').innerHTML = `
+    ${job.skip_reason ? `<div class="alert warn mb"><b>已跳过：</b>${C.esc(job.skip_reason)}</div>` : ''}
+    ${job.status === 'WAITING' ? `<div class="hint mb">${(d.blocking || []).length} 个前置作业尚未成功，作业不会启动。</div>` : ''}
+    <div class="grid cols-2">
+      <div><h3 class="sub">等待全部成功 All must succeed</h3>${upstreamHtml}</div>
+      <div><h3 class="sub">将被本作业影响 Downstream</h3>${downstreamHtml}</div>
+    </div>
+    ${editor}`;
+  const btn = document.getElementById('dep-save');
+  if (btn) btn.addEventListener('click', saveDependencies);
+}
+
+function depOptions(job) {
+  const selected = new Set(job.depends_on || []);
+  return (window.ALL_JOBS || []).filter(j => j.job_id !== job.job_id).map(j =>
+    `<option value="${j.job_id}"${selected.has(j.job_id) ? ' selected' : ''}>` +
+    `${C.esc(j.name)} — ${j.status}</option>`).join('');
+}
+
+async function saveDependencies() {
+  const ids = Array.from(document.getElementById('dep-edit').selectedOptions).map(o => o.value);
+  const btn = document.getElementById('dep-save');
+  btn.disabled = true;
+  try {
+    await API.put('/api/jobs/' + currentJob + '/dependencies', { depends_on: ids });
+    C.toast('依赖已更新 Dependencies updated', 'ok');
+    await render();
+  } catch (e) {
+    C.toast('依赖更新失败 ' + e.message, 'error');
+    btn.disabled = false;
+  }
 }
 
 C.jobPicker('job-picker', (id) => { currentJob = id; render(); });

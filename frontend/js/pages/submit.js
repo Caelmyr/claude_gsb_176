@@ -3,6 +3,7 @@ Components.init('submit');
 const C = Components;
 
 let SAMPLES = [];
+let RECENT_JOBS = [];
 
 async function init() {
   const funcs = await API.get('/api/functions');
@@ -42,6 +43,7 @@ function fillFromSample(s) {
   document.getElementById('num_reduce_tasks').value = s.num_reduce_tasks;
   document.getElementById('input_rows').value = s.input_rows;
   document.getElementById('simulate_failure').checked = false;
+  Array.from(document.getElementById('depends_on').options).forEach(o => { o.selected = false; });
 }
 
 async function onSubmit(ev) {
@@ -53,6 +55,7 @@ async function onSubmit(ev) {
     num_map_tasks: parseInt(document.getElementById('num_map_tasks').value, 10),
     num_reduce_tasks: parseInt(document.getElementById('num_reduce_tasks').value, 10),
     input_rows: parseInt(document.getElementById('input_rows').value, 10),
+    depends_on: Array.from(document.getElementById('depends_on').selectedOptions).map(o => o.value),
     params: {},
   };
   if (document.getElementById('simulate_failure').checked) body.params.simulate_failure = true;
@@ -70,17 +73,31 @@ async function onSubmit(ev) {
 
 async function loadRecent() {
   const d = await API.get('/api/jobs');
-  const jobs = d.jobs || [];
-  document.getElementById('recent').innerHTML = jobs.length
+  RECENT_JOBS = d.jobs || [];
+  const depSel = document.getElementById('depends_on');
+  const selected = Array.from(depSel.selectedOptions).map(o => o.value);
+  depSel.innerHTML = RECENT_JOBS.map(j =>
+    `<option value="${j.job_id}"${selected.includes(j.job_id) ? ' selected' : ''}>` +
+    `${C.esc(j.name)} — ${C.esc(j.job_id)} (${j.status})</option>`).join('');
+
+  document.getElementById('recent').innerHTML = RECENT_JOBS.length
     ? C.table([
         { key: 'name', label: '作业 Job' },
         { key: 'status', label: '状态 Status', render: r => C.stateBadge(r.status, true) },
+        { key: 'deps', label: '依赖 Deps', render: r => renderDeps(r) },
         { key: 'mapper', label: 'Mapper' },
         { key: 'reducer', label: 'Reducer' },
         { key: 'created_ms', label: '时间 Time', render: r => C.fmtTime(r.created_ms) },
         { key: 'link', label: '', render: r => `<a href="monitor.html">监控→</a>` },
-      ], jobs)
+      ], RECENT_JOBS)
     : C.empty();
+}
+
+function renderDeps(job) {
+  const n = (job.depends_on || []).length;
+  if (!n) return '<span class="muted">无 none</span>';
+  const waiting = (job.dependencies && job.dependencies.blocking || []).length;
+  return `<span class="badge ${waiting ? 'warn' : 'good'} badge-dot">${n} 个 · ${waiting} 等待</span>`;
 }
 
 init();

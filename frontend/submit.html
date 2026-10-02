@@ -49,6 +49,13 @@
           </div>
 
           <fieldset>
+            <legend>作业依赖 Dependencies</legend>
+            <label>前置作业（全部成功后才启动；可多选）Upstream jobs</label>
+            <select id="depends_on" multiple size="5" style="min-height:120px"></select>
+            <div class="hint" id="dep-help">不选择则立即提交运行。Leave empty to run immediately.</div>
+          </fieldset>
+
+          <fieldset>
             <legend>高级 Advanced</legend>
             <label style="display:flex;align-items:center;gap:8px;margin:0">
               <input id="simulate_failure" type="checkbox" style="width:auto">

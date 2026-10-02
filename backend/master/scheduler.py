@@ -87,7 +87,8 @@ class Scheduler:
                     self.logbus.warn("", f"worker {worker.name} reaped; {count} tasks reassigned",
                                      task_id="cluster")
 
-        # 2. Advance each active job.
+        # 2. Re-evaluate dependency gates, then advance each active job.
+        self.job_manager.refresh_dependencies()
         for job in self.job_manager.list_jobs():
             if job.is_terminal:
                 continue
@@ -341,6 +342,7 @@ class Scheduler:
             j.stats["total_task_attempts"] = sum(t.attempts for t in map_tasks + reduce_tasks)
 
         self.job_manager.apply_job(job.job_id, apply)
+        self.job_manager.refresh_dependencies()
         self.logbus.info(job.job_id, "job succeeded", task_id="job")
         self._cleanup_worker_shuffle(job)
 

@@ -11,6 +11,7 @@ serialisation path.
 
 from __future__ import annotations
 
+from collections import deque
 import os
 import threading
 from typing import Callable, Optional
@@ -59,6 +60,8 @@ class JobManager:
                     task = Task.from_dict(tdoc)
                     tasks[task.task_id] = task
             self._tasks[job_id] = tasks
+        with self._lock:
+            self._refresh_dependencies_locked()
 
     def save_job(self, job: Job) -> None:
         self.storage.write(job.to_dict(), *self._job_path(job.job_id))
@@ -84,31 +87,185 @@ class JobManager:
         input_rows = int(payload.get("input_rows", defaults.get("input_rows", 12000)))
         params = dict(payload.get("params") or {})
         params["input_kind"] = input_kind_for(mapper)
+        depends_on = self._normalize_dependency_ids(payload.get("depends_on", []))
 
-        job = new_job(name, mapper, reducer, num_map, num_reduce, input_rows, params)
+        job = new_job(name, mapper, reducer, num_map, num_reduce, input_rows, params, depends_on)
 
         with self._lock:
-            plan = self.planner.plan(job)
-            job.num_map_tasks = len(plan["map_tasks"])
-            job.map_task_ids = [t.task_id for t in plan["map_tasks"]]
-            job.reduce_task_ids = [t.task_id for t in plan["reduce_tasks"]]
-            job.status = C.JOB_MAP
-            job.started_ms = now_ms()
-            job.stats["total_records"] = plan["total_records"] + 1
-            job.stats["input_kind"] = params["input_kind"]
-
+            self._validate_dependencies(job.job_id, job.depends_on)
+            job.status = C.JOB_WAITING if job.depends_on else C.JOB_PENDING
             self._jobs[job.job_id] = job
             self._tasks[job.job_id] = {}
-            for task in plan["map_tasks"] + plan["reduce_tasks"]:
-                self._tasks[job.job_id][task.task_id] = task
-                self.save_task(job.job_id, task)
             self.save_job(job)
+            self._refresh_dependencies_locked()
 
-        self.logbus.info(
-            job.job_id, f"job submitted: {job.num_map_tasks} map / {job.num_reduce_tasks} reduce, "
-                        f"{plan['total_records']} records", task_id="submit",
-        )
+        if job.status == C.JOB_WAITING:
+            self.logbus.info(
+                job.job_id,
+                f"job submitted and waiting for {len(job.depends_on)} dependencies",
+                task_id="submit",
+            )
+        elif job.status == C.JOB_SKIPPED:
+            self.logbus.warn(job.job_id, f"job skipped before start: {job.skip_reason}", task_id="submit")
+        else:
+            self.logbus.info(
+                job.job_id,
+                f"job submitted: {job.num_map_tasks} map / {job.num_reduce_tasks} reduce",
+                task_id="submit",
+            )
         return job
+
+    def _normalize_dependency_ids(self, value) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            values = [v.strip() for v in value.replace(";", ",").split(",")]
+        elif isinstance(value, (list, tuple, set)):
+            values = [str(v).strip() for v in value]
+        else:
+            raise ValueError("depends_on must be a list of job ids")
+        return list(dict.fromkeys(v for v in values if v))
+
+    def _validate_dependencies(self, job_id: str, depends_on: list[str]) -> None:
+        for dep_id in depends_on:
+            if dep_id == job_id:
+                raise ValueError(f"job cannot depend on itself: {job_id}")
+            if dep_id not in self._jobs:
+                raise ValueError(f"unknown dependency job: {dep_id}")
+        if depends_on and self._would_create_cycle(job_id, depends_on):
+            raise ValueError("dependency cycle detected")
+
+    def _would_create_cycle(self, job_id: str, depends_on: list[str]) -> bool:
+        """Check whether replacing ``job_id``'s edges leaves a path back to it."""
+        # ``job_id`` may not exist yet (submission); on update, ignore its current
+        # outgoing edges because they are being replaced by ``depends_on``.
+        forward = {
+            jid: list(getattr(job, "depends_on", []))
+            for jid, job in self._jobs.items()
+            if jid != job_id
+        }
+        pending = deque(depends_on)
+        seen: set[str] = set()
+        while pending:
+            current = pending.popleft()
+            if current == job_id:
+                return True
+            if current in seen:
+                continue
+            seen.add(current)
+            for dep_id in forward.get(current, []):
+                if dep_id not in seen:
+                    pending.append(dep_id)
+        return False
+
+    def _dependency_snapshot(self, job: Job) -> dict[str, str]:
+        with self._lock:
+            return {
+                dep_id: self._jobs[dep_id].status
+                for dep_id in getattr(job, "depends_on", [])
+                if dep_id in self._jobs
+            }
+
+    def _blocking_dependencies_locked(self, job: Job) -> list[str]:
+        blocking = []
+        for dep_id in getattr(job, "depends_on", []):
+            dep = self._jobs.get(dep_id)
+            if dep is None or dep.status != C.JOB_SUCCEEDED:
+                blocking.append(dep_id)
+        return blocking
+
+    def _failed_dependency_locked(self, job: Job) -> Optional[Job]:
+        for dep_id in getattr(job, "depends_on", []):
+            dep = self._jobs.get(dep_id)
+            if dep is not None and dep.status in (C.JOB_FAILED, C.JOB_CANCELLED, C.JOB_SKIPPED):
+                return dep
+        return None
+
+    def _activate_job_locked(self, job: Job) -> None:
+        """Create a waiting job's shards/tasks and move it into the MAP stage."""
+        plan = self.planner.plan(job)
+        job.num_map_tasks = len(plan["map_tasks"])
+        job.map_task_ids = [t.task_id for t in plan["map_tasks"]]
+        job.reduce_task_ids = [t.task_id for t in plan["reduce_tasks"]]
+        job.status = C.JOB_MAP
+        job.started_ms = now_ms()
+        job.dependency_status = self._dependency_snapshot(job)
+        job.skip_reason = ""
+        job.stats["total_records"] = plan["total_records"] + 1
+        job.stats["input_kind"] = job.params["input_kind"]
+
+        for task in plan["map_tasks"] + plan["reduce_tasks"]:
+            self._tasks.setdefault(job.job_id, {})[task.task_id] = task
+            self.save_task(job.job_id, task)
+        self.save_job(job)
+
+    def _skip_job_locked(self, job: Job, failed_dep: Job) -> None:
+        job.status = C.JOB_SKIPPED
+        if not job.finished_ms:
+            job.finished_ms = now_ms()
+        job.dependency_status = self._dependency_snapshot(job)
+        job.skip_reason = f"upstream job {failed_dep.job_id} ended as {failed_dep.status}"
+        job.error = job.skip_reason
+        self.save_job(job)
+        self.logbus.warn(job.job_id, f"job skipped: {job.skip_reason}", task_id="job")
+
+    def _refresh_dependencies_locked(self) -> int:
+        """Re-evaluate blocked jobs; repeat so multi-level skips cascade."""
+        changed = 0
+        for _ in range(max(1, len(self._jobs))):
+            round_changes = 0
+            for job in list(self._jobs.values()):
+                if job.status == C.JOB_PENDING and not getattr(job, "depends_on", []):
+                    self._activate_job_locked(job)
+                    self.logbus.info(job.job_id, "job started", task_id="job")
+                    round_changes += 1
+                    changed += 1
+                    continue
+                if job.status != C.JOB_WAITING:
+                    continue
+                job.dependency_status = self._dependency_snapshot(job)
+                failed_dep = self._failed_dependency_locked(job)
+                if failed_dep is not None:
+                    self._skip_job_locked(job, failed_dep)
+                    round_changes += 1
+                    changed += 1
+                    continue
+                if not self._blocking_dependencies_locked(job):
+                    self._activate_job_locked(job)
+                    self.logbus.info(job.job_id, "all dependencies succeeded; job started",
+                                     task_id="job")
+                    round_changes += 1
+                    changed += 1
+            if not round_changes:
+                break
+        return changed
+
+    def refresh_dependencies(self) -> int:
+        with self._lock:
+            return self._refresh_dependencies_locked()
+
+    def update_dependencies(self, job_id: str, depends_on) -> Job:
+        deps = self._normalize_dependency_ids(depends_on)
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise KeyError(f"unknown job {job_id}")
+            if job.status != C.JOB_WAITING:
+                raise ValueError("dependencies can only be changed while a job is WAITING")
+            self._validate_dependencies(job_id, deps)
+            old = set(job.depends_on)
+            job.depends_on = deps
+            job.dependency_status = self._dependency_snapshot(job)
+            self.save_job(job)
+            self._refresh_dependencies_locked()
+            added = sorted(set(deps) - old)
+            removed = sorted(old - set(deps))
+            self.logbus.info(
+                job_id,
+                f"dependencies updated (added={added or '-'}, removed={removed or '-'})",
+                task_id="job",
+            )
+            return job
 
     # ------------------------------------------------------------------
     # Queries
@@ -132,6 +289,13 @@ class JobManager:
             tasks = [t for t in tasks if t.kind == kind]
         return sorted(tasks, key=lambda t: (t.kind, t.index))
 
+    def downstream_of(self, job_id: str) -> list[Job]:
+        with self._lock:
+            return [
+                job for job in self._jobs.values()
+                if job_id in getattr(job, "depends_on", [])
+            ]
+
     # ------------------------------------------------------------------
     # Mutations
     # ------------------------------------------------------------------
@@ -143,6 +307,8 @@ class JobManager:
             if status in C.JOB_TERMINAL_STATES and not job.finished_ms:
                 job.finished_ms = now_ms()
             self.save_job(job)
+            if status in C.JOB_TERMINAL_STATES:
+                self._refresh_dependencies_locked()
         return job
 
     def update_task(self, job_id: str, task_id: str, **fields) -> Optional[Task]:
@@ -190,15 +356,18 @@ class JobManager:
                          status=C.TASK_ASSIGNED, worker_id=worker_id,
                          assigned_ms=now_ms(), attempts=task.attempts + 0)
 
-    def cancel(self, job: Job) -> Job:
+    def cancel(self, job: Job, error: str = "job cancelled") -> Job:
+        job.error = error
         self.set_job_status(job, C.JOB_CANCELLED)
-        self.logbus.warn(job.job_id, "job cancelled", task_id="job")
+        self.logbus.warn(job.job_id, error, task_id="job")
         return job
 
     def fail(self, job: Job, error: str) -> Job:
+        was_terminal = job.is_terminal
         job.error = error
         self.set_job_status(job, C.JOB_FAILED)
-        self.logbus.error(job.job_id, f"job failed: {error}", task_id="job")
+        if not was_terminal:
+            self.logbus.error(job.job_id, f"job failed: {error}", task_id="job")
         return job
 
     # ------------------------------------------------------------------
@@ -223,6 +392,34 @@ class JobManager:
             }
         return progress
 
+    def _dependency_view(self, job: Job) -> dict:
+        deps = []
+        blocking = []
+        with self._lock:
+            for dep_id in getattr(job, "depends_on", []):
+                dep = self._jobs.get(dep_id)
+                status = dep.status if dep else "MISSING"
+                deps.append({
+                    "job_id": dep_id,
+                    "name": dep.name if dep else "<deleted>",
+                    "status": status,
+                    "succeeded": status == C.JOB_SUCCEEDED,
+                })
+                if status != C.JOB_SUCCEEDED:
+                    blocking.append(dep_id)
+            downstream = [
+                {"job_id": j.job_id, "name": j.name, "status": j.status}
+                for j in self._jobs.values()
+                if job.job_id in getattr(j, "depends_on", [])
+            ]
+        return {
+            "depends_on": list(getattr(job, "depends_on", [])),
+            "downstream": downstream,
+            "upstream": deps,
+            "blocking": blocking,
+            "editable": job.status == C.JOB_WAITING,
+        }
+
     def job_summary(self, job: Job) -> dict:
         tasks = self.tasks_for(job.job_id)
         by_status: dict[str, int] = {}
@@ -234,6 +431,10 @@ class JobManager:
             "mapper": job.mapper,
             "reducer": job.reducer,
             "status": job.status,
+            "depends_on": list(getattr(job, "depends_on", [])),
+            "dependency_status": self._dependency_snapshot(job),
+            "dependencies": self._dependency_view(job),
+            "skip_reason": getattr(job, "skip_reason", ""),
             "num_map_tasks": job.num_map_tasks,
             "num_reduce_tasks": job.num_reduce_tasks,
             "input_rows": job.input_rows,

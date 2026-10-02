@@ -79,6 +79,8 @@ class Master:
         app.add_url_rule("/api/samples", "samples", self._samples, methods=["GET"])
         app.add_url_rule("/api/jobs", "jobs", self._jobs, methods=["GET", "POST"])
         app.add_url_rule("/api/jobs/<job_id>", "job_detail", self._job_detail, methods=["GET"])
+        app.add_url_rule("/api/jobs/<job_id>/dependencies", "job_dependencies",
+                         self._job_dependencies, methods=["GET", "PUT"])
         app.add_url_rule("/api/jobs/<job_id>/cancel", "job_cancel", self._job_cancel, methods=["POST"])
         app.add_url_rule("/api/jobs/<job_id>/tasks", "job_tasks", self._job_tasks, methods=["GET"])
         app.add_url_rule("/api/jobs/<job_id>/shards", "job_shards", self._job_shards, methods=["GET"])
@@ -154,13 +156,15 @@ class Master:
     # ------------------------------------------------------------------
     def _overview(self):
         jobs = self.job_manager.list_jobs()
-        active = [j for j in jobs if not j.is_terminal]
+        active = [j for j in jobs if not j.is_terminal and j.status not in (C.JOB_PENDING, C.JOB_WAITING)]
         return jsonify({
             "jobs_total": len(jobs),
             "jobs_active": len(active),
+            "jobs_waiting": sum(1 for j in jobs if j.status == C.JOB_WAITING),
             "jobs_succeeded": sum(1 for j in jobs if j.status in (C.JOB_SUCCEEDED, C.JOB_REDUCE)),
             "jobs_failed": sum(1 for j in jobs if j.status == C.JOB_FAILED),
             "jobs_cancelled": sum(1 for j in jobs if j.status == C.JOB_CANCELLED),
+            "jobs_skipped": sum(1 for j in jobs if j.status == C.JOB_SKIPPED),
             "workers": self.registry.summary(),
             "config": self.config.to_dict(),
             "recent_jobs": [self.job_manager.job_summary(j) for j in jobs[:10]],
@@ -194,6 +198,21 @@ class Master:
             "job": summary,
             "tasks": [self._task_view(t) for t in self.job_manager.tasks_for(job_id)],
         })
+
+    def _job_dependencies(self, job_id: str):
+        job, err, code = self._get_job(job_id)
+        if job is None:
+            return err, code
+        if request.method == "PUT":
+            body = request.get_json(silent=True) or {}
+            try:
+                job = self.job_manager.update_dependencies(job_id, body.get("depends_on", []))
+            except KeyError as exc:
+                return jsonify({"error": str(exc)}), 404
+            except ValueError as exc:
+                status = 409 if "WAITING" in str(exc) else 400
+                return jsonify({"error": str(exc)}), status
+        return jsonify(self.job_manager.job_summary(job)["dependencies"])
 
     def _job_cancel(self, job_id: str):
         job, err, code = self._get_job(job_id)
