@@ -123,6 +123,7 @@ class Job:
     finished_ms: int = 0
     map_task_ids: list[str] = field(default_factory=list)
     reduce_task_ids: list[str] = field(default_factory=list)
+    depends_on: list[str] = field(default_factory=list)   # job ids that must succeed first
     stage_progress: dict = field(default_factory=dict)   # stage -> {done, total, pct}
     stats: dict = field(default_factory=dict)
     error: str = ""

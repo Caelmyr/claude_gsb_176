@@ -85,15 +85,28 @@ class JobManager:
         params = dict(payload.get("params") or {})
         params["input_kind"] = input_kind_for(mapper)
 
+        # Dependency ids are validated by the DependencyResolver (API layer);
+        # here they are only normalized.  A job with dependencies is planned
+        # immediately but parks in WAITING until the resolver releases it.
+        depends_on: list[str] = []
+        for raw in payload.get("depends_on") or []:
+            dep = str(raw).strip()
+            if dep and dep not in depends_on:
+                depends_on.append(dep)
+
         job = new_job(name, mapper, reducer, num_map, num_reduce, input_rows, params)
+        job.depends_on = depends_on
 
         with self._lock:
             plan = self.planner.plan(job)
             job.num_map_tasks = len(plan["map_tasks"])
             job.map_task_ids = [t.task_id for t in plan["map_tasks"]]
             job.reduce_task_ids = [t.task_id for t in plan["reduce_tasks"]]
-            job.status = C.JOB_MAP
-            job.started_ms = now_ms()
+            if depends_on:
+                job.status = C.JOB_WAITING
+            else:
+                job.status = C.JOB_MAP
+                job.started_ms = now_ms()
             job.stats["total_records"] = plan["total_records"] + 1
             job.stats["input_kind"] = params["input_kind"]
 
@@ -104,10 +117,16 @@ class JobManager:
                 self.save_task(job.job_id, task)
             self.save_job(job)
 
-        self.logbus.info(
-            job.job_id, f"job submitted: {job.num_map_tasks} map / {job.num_reduce_tasks} reduce, "
-                        f"{plan['total_records']} records", task_id="submit",
-        )
+        if depends_on:
+            self.logbus.info(
+                job.job_id, f"job submitted: waiting on {len(depends_on)} "
+                            f"dependencies ({', '.join(depends_on)})", task_id="deps",
+            )
+        else:
+            self.logbus.info(
+                job.job_id, f"job submitted: {job.num_map_tasks} map / {job.num_reduce_tasks} reduce, "
+                            f"{plan['total_records']} records", task_id="submit",
+            )
         return job
 
     # ------------------------------------------------------------------
@@ -131,6 +150,14 @@ class JobManager:
         if kind:
             tasks = [t for t in tasks if t.kind == kind]
         return sorted(tasks, key=lambda t: (t.kind, t.index))
+
+    def dependents_of(self, job_id: str) -> list[Job]:
+        """Jobs that declared ``job_id`` in their ``depends_on`` list."""
+        with self._lock:
+            return sorted(
+                (j for j in self._jobs.values() if job_id in (j.depends_on or [])),
+                key=lambda j: j.created_ms,
+            )
 
     # ------------------------------------------------------------------
     # Mutations
@@ -223,6 +250,27 @@ class JobManager:
             }
         return progress
 
+    def dependency_view(self, job: Job) -> list[dict]:
+        """Live per-dependency status for the UI, so a WAITING/SKIPPED job can
+        always show *which* upstream job it is blocked on (or was doomed by)."""
+        view: list[dict] = []
+        for dep_id in job.depends_on:
+            dep = self.get_job(dep_id)
+            if dep is None:
+                view.append({
+                    "job_id": dep_id, "name": dep_id, "status": "MISSING",
+                    "status_label": "已删除 Missing", "met": False,
+                })
+                continue
+            view.append({
+                "job_id": dep.job_id,
+                "name": dep.name,
+                "status": dep.status,
+                "status_label": C.state_label(dep.status),
+                "met": dep.status == C.JOB_SUCCEEDED,
+            })
+        return view
+
     def job_summary(self, job: Job) -> dict:
         tasks = self.tasks_for(job.job_id)
         by_status: dict[str, int] = {}
@@ -243,6 +291,14 @@ class JobManager:
             "error": job.error,
             "params": job.params,
             "stats": job.stats,
+            "depends_on": list(job.depends_on),
+            "dependency_status": self.dependency_view(job),
+            "dependents": [
+                {"job_id": d.job_id, "name": d.name, "status": d.status,
+                 "status_label": C.state_label(d.status)}
+                for d in self.dependents_of(job.job_id)
+            ],
+            "skip_reason": job.stats.get("skip_reason", ""),
             "task_status": by_status,
             "stage_progress": self.stage_progress(job),
         }

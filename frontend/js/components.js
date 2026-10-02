@@ -15,13 +15,15 @@ const Components = (() => {
   ];
 
   const LABELS = {
-    PENDING: '待调度 Pending', SHARDING: '分片 Sharding', MAP: 'Map', SHUFFLE: 'Shuffle',
+    PENDING: '待调度 Pending', WAITING: '等待依赖 Waiting', SHARDING: '分片 Sharding', MAP: 'Map', SHUFFLE: 'Shuffle',
     REDUCE: 'Reduce', SUCCEEDED: '成功 Succeeded', FAILED: '失败 Failed', CANCELLED: '已取消 Cancelled',
+    SKIPPED: '已跳过 Skipped', MISSING: '已删除 Missing',
     ASSIGNED: '已分配 Assigned', RUNNING: '运行中 Running', RETRYING: '重试 Retrying',
     alive: '存活 Alive', dead: '失联 Dead', ready: '就绪 Ready', done: '完成 Done',
   };
   const CLASS = {
-    SUCCEEDED: 'good', FAILED: 'bad', CANCELLED: 'muted', RUNNING: 'run', MAP: 'run',
+    SUCCEEDED: 'good', FAILED: 'bad', CANCELLED: 'muted', SKIPPED: 'muted', MISSING: 'bad',
+    RUNNING: 'run', MAP: 'run', WAITING: 'warn',
     REDUCE: 'aqua', SHUFFLE: 'warn', RETRYING: 'warn', ASSIGNED: 'aqua', PENDING: 'muted',
     SHARDING: 'muted', alive: 'good', dead: 'bad', ready: 'muted', done: 'good',
   };

@@ -9,6 +9,7 @@ without any enum decoding ceremony.
 # Job lifecycle states
 # ---------------------------------------------------------------------------
 JOB_PENDING = "PENDING"        # accepted, not yet scheduled
+JOB_WAITING = "WAITING"        # blocked on dependency jobs
 JOB_SHARDING = "SHARDING"      # input is being split into shards
 JOB_MAP = "MAP"                # map tasks running
 JOB_SHUFFLE = "SHUFFLE"        # partitions being transferred / sorted
@@ -16,13 +17,14 @@ JOB_REDUCE = "REDUCE"          # reduce tasks running
 JOB_SUCCEEDED = "SUCCEEDED"
 JOB_FAILED = "FAILED"
 JOB_CANCELLED = "CANCELLED"
+JOB_SKIPPED = "SKIPPED"        # never ran: a dependency failed / was cancelled
 
-JOB_ACTIVE_STATES = {JOB_PENDING, JOB_SHARDING, JOB_MAP, JOB_SHUFFLE, JOB_REDUCE}
-JOB_TERMINAL_STATES = {JOB_SUCCEEDED, JOB_FAILED, JOB_CANCELLED}
+JOB_ACTIVE_STATES = {JOB_PENDING, JOB_WAITING, JOB_SHARDING, JOB_MAP, JOB_SHUFFLE, JOB_REDUCE}
+JOB_TERMINAL_STATES = {JOB_SUCCEEDED, JOB_FAILED, JOB_CANCELLED, JOB_SKIPPED}
 
 JOB_STATES = [
-    JOB_PENDING, JOB_SHARDING, JOB_MAP, JOB_SHUFFLE, JOB_REDUCE,
-    JOB_SUCCEEDED, JOB_FAILED, JOB_CANCELLED,
+    JOB_PENDING, JOB_WAITING, JOB_SHARDING, JOB_MAP, JOB_SHUFFLE, JOB_REDUCE,
+    JOB_SUCCEEDED, JOB_FAILED, JOB_CANCELLED, JOB_SKIPPED,
 ]
 
 # ---------------------------------------------------------------------------
@@ -77,6 +79,7 @@ LOG_LEVELS = [LOG_DEBUG, LOG_INFO, LOG_WARN, LOG_ERROR]
 # ---------------------------------------------------------------------------
 STATE_LABELS = {
     JOB_PENDING: "待调度 Pending",
+    JOB_WAITING: "等待依赖 Waiting",
     JOB_SHARDING: "分片中 Sharding",
     JOB_MAP: "Map 阶段 Map",
     JOB_SHUFFLE: "Shuffle 阶段 Shuffle",
@@ -84,6 +87,7 @@ STATE_LABELS = {
     JOB_SUCCEEDED: "成功 Succeeded",
     JOB_FAILED: "失败 Failed",
     JOB_CANCELLED: "已取消 Cancelled",
+    JOB_SKIPPED: "已跳过 Skipped",
     TASK_PENDING: "待执行 Pending",
     TASK_ASSIGNED: "已分配 Assigned",
     TASK_RUNNING: "运行中 Running",

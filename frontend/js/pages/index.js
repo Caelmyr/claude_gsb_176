@@ -12,6 +12,7 @@ async function load() {
     { label: '运行中 Active', value: ov.jobs_active, cls: ov.jobs_active ? 'good' : '' },
     { label: '成功 Succeeded', value: ov.jobs_succeeded, cls: 'good' },
     { label: '失败 Failed', value: ov.jobs_failed, cls: ov.jobs_failed ? 'bad' : '' },
+    { label: '已跳过 Skipped', value: ov.jobs_skipped || 0, cls: ov.jobs_skipped ? 'warn' : '' },
     { label: 'Worker 存活 Alive', value: w.alive, cls: 'good' },
     { label: 'Worker 失联 Dead', value: w.dead, cls: w.dead ? 'bad' : '' },
   ].map(s => `<div class="stat"><div class="label">${s.label}</div><div class="value ${s.cls || ''}">${C.fmtNum(s.value)}</div></div>`).join('');

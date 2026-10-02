@@ -10,6 +10,7 @@ async function init() {
 
   fillSelect('mapper', funcs.mappers);
   fillSelect('reducer', funcs.reducers);
+  await fillDeps();
 
   const preset = document.getElementById('preset');
   preset.innerHTML = SAMPLES.map(s => `<option value="${s.name}">${C.esc(s.name)}</option>`).join('');
@@ -34,6 +35,23 @@ function fillSelect(id, items) {
     .map(f => `<option value="${f.name}">${C.esc(f.name)}</option>`).join('');
 }
 
+// Candidate dependency jobs: everything already submitted (any state — a job
+// may legitimately chain onto a running, waiting or already-finished job).
+async function fillDeps() {
+  try {
+    const d = await API.get('/api/jobs');
+    const jobs = d.jobs || [];
+    document.getElementById('depends_on').innerHTML = jobs.length
+      ? jobs.map(j => `<option value="${j.job_id}">${C.esc(j.name)} — ${j.job_id} (${j.status})</option>`).join('')
+      : '<option value="" disabled>暂无前置作业 No existing jobs</option>';
+  } catch (e) { /* master unreachable; leave the select empty */ }
+}
+
+function selectedDeps() {
+  return Array.from(document.getElementById('depends_on').selectedOptions)
+    .map(o => o.value).filter(v => v);
+}
+
 function fillFromSample(s) {
   document.getElementById('name').value = s.name;
   document.getElementById('mapper').value = s.mapper;
@@ -42,6 +60,7 @@ function fillFromSample(s) {
   document.getElementById('num_reduce_tasks').value = s.num_reduce_tasks;
   document.getElementById('input_rows').value = s.input_rows;
   document.getElementById('simulate_failure').checked = false;
+  Array.from(document.getElementById('depends_on').options).forEach(o => { o.selected = false; });
 }
 
 async function onSubmit(ev) {
@@ -53,6 +72,7 @@ async function onSubmit(ev) {
     num_map_tasks: parseInt(document.getElementById('num_map_tasks').value, 10),
     num_reduce_tasks: parseInt(document.getElementById('num_reduce_tasks').value, 10),
     input_rows: parseInt(document.getElementById('input_rows').value, 10),
+    depends_on: selectedDeps(),
     params: {},
   };
   if (document.getElementById('simulate_failure').checked) body.params.simulate_failure = true;
@@ -60,7 +80,8 @@ async function onSubmit(ev) {
   btn.disabled = true;
   try {
     const job = await API.post('/api/jobs', body);
-    C.toast('作业已提交 Job submitted: ' + job.job_id, 'ok');
+    const note = job.status === 'WAITING' ? '（等待依赖 waiting on dependencies）' : '';
+    C.toast('作业已提交 Job submitted: ' + job.job_id + note, 'ok');
     setTimeout(() => location.href = 'monitor.html', 600);
   } catch (e) {
     C.toast('提交失败 ' + e.message, 'error');

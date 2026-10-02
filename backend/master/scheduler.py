@@ -27,6 +27,7 @@ from backend.common.jsonutil import now_ms
 from backend.common.logbus import LogBus
 from backend.common.models import Job, Task, WorkerRecord
 from backend.common.storage import Storage
+from backend.master.dependencies import DependencyResolver
 from backend.master.fault_tolerance import FaultTolerance
 from backend.master.job_manager import JobManager
 from backend.master.metrics import Metrics
@@ -48,6 +49,7 @@ class Scheduler:
         metrics: Metrics,
         config,
         logbus: LogBus,
+        deps: Optional[DependencyResolver] = None,
     ) -> None:
         self.storage = storage
         self.job_manager = job_manager
@@ -57,6 +59,7 @@ class Scheduler:
         self.metrics = metrics
         self.config = config
         self.logbus = logbus
+        self.deps = deps or DependencyResolver(job_manager, logbus)
         self.client = HttpClient(timeout=3.0, retries=1)
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, daemon=True, name="scheduler")
@@ -87,7 +90,10 @@ class Scheduler:
                     self.logbus.warn("", f"worker {worker.name} reaped; {count} tasks reassigned",
                                      task_id="cluster")
 
-        # 2. Advance each active job.
+        # 2. Release or skip WAITING jobs whose dependencies just settled.
+        self.deps.evaluate()
+
+        # 3. Advance each active job.
         for job in self.job_manager.list_jobs():
             if job.is_terminal:
                 continue
@@ -99,6 +105,8 @@ class Scheduler:
     # ------------------------------------------------------------------
     def _advance(self, job: Job) -> None:
         status = job.status
+        if status not in (C.JOB_MAP, C.JOB_SHUFFLE, C.JOB_REDUCE):
+            return  # PENDING/WAITING jobs are the DependencyResolver's concern
         if status == C.JOB_MAP:
             self._dispatch_tasks(job, C.TASK_MAP)
             map_tasks = self.job_manager.tasks_for(job.job_id, C.TASK_MAP)
@@ -266,6 +274,7 @@ class Scheduler:
         if status != C.TASK_SUCCEEDED:
             self.registry.task_finished(worker_id, success=False)
             self.fault_tolerance.handle_task_failure(job, task, payload.get("error", ""), worker_id)
+            self.deps.evaluate()  # a doomed job may doom its dependents
             return
 
         # Success path.
@@ -343,6 +352,7 @@ class Scheduler:
         self.job_manager.apply_job(job.job_id, apply)
         self.logbus.info(job.job_id, "job succeeded", task_id="job")
         self._cleanup_worker_shuffle(job)
+        self.deps.evaluate()  # release dependents waiting on this job
 
     def _cleanup_worker_shuffle(self, job: Job) -> None:
         for worker in self.registry.alive():

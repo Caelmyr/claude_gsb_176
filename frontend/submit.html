@@ -49,6 +49,13 @@
           </div>
 
           <fieldset>
+            <legend>依赖 Dependencies</legend>
+            <label>前置作业 Depends on（全部成功后本作业才启动 all must succeed）</label>
+            <select id="depends_on" multiple size="4"></select>
+            <span class="hint">按住 Ctrl/⌘ 可多选；任一前置失败或被取消时本作业将自动跳过。Hold Ctrl/⌘ to multi-select; the job is skipped if any dependency fails or is cancelled.</span>
+          </fieldset>
+
+          <fieldset>
             <legend>高级 Advanced</legend>
             <label style="display:flex;align-items:center;gap:8px;margin:0">
               <input id="simulate_failure" type="checkbox" style="width:auto">

@@ -5,6 +5,7 @@ const C = Components;
 let currentJob = '';
 let kindFilter = '';
 let lastData = null;
+let editingDeps = false;
 
 function setupFilters() {
   const kinds = [['', '全部 All'], ['map', 'Map'], ['reduce', 'Reduce']];
@@ -50,6 +51,8 @@ async function render() {
       </div>
     </div>`;
 
+  if (!editingDeps) renderDeps(job);
+
   // Tasks table
   const filtered = tasks.filter(t => !kindFilter || t.kind === kindFilter);
   document.getElementById('tasks').innerHTML = filtered.length ? C.table([
@@ -64,7 +67,95 @@ async function render() {
   ], filtered) : C.empty();
 }
 
-C.jobPicker('job-picker', (id) => { currentJob = id; render(); });
+// ------------------------------------------------------------------
+// Dependency card: upstream status, downstream dependents, mid-flight edits.
+// ------------------------------------------------------------------
+async function renderDeps(job) {
+  const host = document.getElementById('deps');
+  const deps = job.dependency_status || [];
+  const dependents = job.dependents || [];
+  if (!deps.length && !dependents.length && job.status !== 'WAITING' && job.status !== 'SKIPPED') {
+    host.innerHTML = '';
+    return;
+  }
+
+  let banner = '';
+  if (job.status === 'SKIPPED') {
+    banner = `<div class="badge bad" style="font-size:13px;padding:6px 10px">已跳过 Skipped — ${C.esc(job.skip_reason || 'dependency did not succeed')}</div>`;
+  } else if (job.status === 'WAITING') {
+    const unmet = deps.filter(d => !d.met).length;
+    banner = `<div class="badge warn" style="font-size:13px;padding:6px 10px">等待依赖 Waiting — ${unmet} 个前置作业未成功 / ${unmet} dependencies not yet succeeded</div>`;
+  }
+
+  const depRows = deps.length ? C.table([
+    { key: 'name', label: '前置作业 Dependency', render: r => `${C.esc(r.name)} <span class="mono muted">${C.esc(r.job_id)}</span>` },
+    { key: 'status', label: '状态 Status', render: r => C.stateBadge(r.status, true) },
+    {
+      key: 'met', label: '是否满足 Met', render: r => r.met
+        ? '<span class="badge good">满足 Met</span>'
+        : (['FAILED', 'CANCELLED', 'SKIPPED', 'MISSING'].includes(r.status)
+          ? '<span class="badge bad">未满足 Unmet</span>'
+          : '<span class="badge muted">等待中 Pending</span>'),
+    },
+  ], deps) : '<div class="empty">无前置依赖 No upstream dependencies</div>';
+
+  const depChips = dependents.length
+    ? dependents.map(d => `<span class="badge ${C.CLASS[d.status] || 'muted'}" title="${C.esc(d.job_id)}">${C.esc(d.name)}</span>`).join(' ')
+    : '<span class="muted small">无 None</span>';
+
+  const editBtn = job.status === 'WAITING'
+    ? '<button class="btn small" id="deps-edit">修改依赖 Edit dependencies</button>' : '';
+
+  host.innerHTML = `
+    <div class="card mt">
+      <h2>作业依赖 <span class="sub">Dependencies</span></h2>
+      ${banner}
+      <div class="mt">${depRows}</div>
+      <div class="mt small"><span class="muted">被以下作业依赖 Depended on by:</span> ${depChips}</div>
+      <div class="mt" id="deps-editor">${editBtn}</div>
+    </div>`;
+
+  const btn = document.getElementById('deps-edit');
+  if (btn) btn.addEventListener('click', () => openDepsEditor(job));
+}
+
+async function openDepsEditor(job) {
+  editingDeps = true;
+  const host = document.getElementById('deps-editor');
+  let jobs = [];
+  try { jobs = (await API.get('/api/jobs')).jobs || []; } catch (e) { /* fall through */ }
+  const candidates = jobs.filter(j => j.job_id !== job.job_id);
+  const opts = candidates.map(j => {
+    const sel = (job.depends_on || []).includes(j.job_id) ? ' selected' : '';
+    return `<option value="${j.job_id}"${sel}>${C.esc(j.name)} — ${j.job_id} (${j.status})</option>`;
+  }).join('');
+  host.innerHTML = `
+    <label class="small muted">前置作业 Depends on（保存后立即重新判定 re-evaluated on save）</label>
+    <select id="deps-select" multiple size="6" style="width:100%">${opts}</select>
+    <div class="flex mt">
+      <button class="btn primary small" id="deps-save">保存 Save</button>
+      <button class="btn small" id="deps-cancel">取消 Cancel</button>
+      <span class="hint">清空全部选项表示立即放行本作业。Clearing all releases the job immediately.</span>
+    </div>`;
+  document.getElementById('deps-save').addEventListener('click', async () => {
+    const deps = Array.from(document.getElementById('deps-select').selectedOptions).map(o => o.value);
+    try {
+      await API.put('/api/jobs/' + job.job_id + '/deps', { depends_on: deps });
+      C.toast('依赖已更新 Dependencies updated', 'ok');
+    } catch (e) {
+      C.toast('更新失败 ' + e.message, 'error');
+    }
+    editingDeps = false;
+    render();
+  });
+  document.getElementById('deps-cancel').addEventListener('click', () => {
+    editingDeps = false;
+    render();
+  });
+}
+
+
+C.jobPicker('job-picker', (id) => { currentJob = id; editingDeps = false; render(); });
 document.getElementById('refresh').addEventListener('click', render);
 setupFilters();
 C.poll(render, 2000).start();

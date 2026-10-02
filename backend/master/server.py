@@ -21,6 +21,7 @@ from backend.common.config import ClusterConfig, ConfigManager, JobDefaults
 from backend.common.logbus import LogBus
 from backend.common.models import Job
 from backend.common.storage import Storage, list_files, read_json
+from backend.master.dependencies import DependencyResolver
 from backend.master.fault_tolerance import FaultTolerance
 from backend.master.job_manager import JobManager
 from backend.master.metrics import Metrics
@@ -51,9 +52,11 @@ class Master:
         self.shuffle = ShuffleCoordinator(self.storage, self.job_manager, self.registry, self.logbus)
         self.fault_tolerance = FaultTolerance(self.storage, self.job_manager, self.config, self.logbus)
         self.registry.on_death = self.fault_tolerance.handle_worker_death
+        self.deps = DependencyResolver(self.job_manager, self.logbus)
         self.scheduler = Scheduler(
             self.storage, self.job_manager, self.registry, self.shuffle,
             self.fault_tolerance, self.metrics, self.config, self.logbus,
+            deps=self.deps,
         )
 
         self.app = Flask("master", static_folder=FRONTEND_DIR, static_url_path="")
@@ -80,6 +83,7 @@ class Master:
         app.add_url_rule("/api/jobs", "jobs", self._jobs, methods=["GET", "POST"])
         app.add_url_rule("/api/jobs/<job_id>", "job_detail", self._job_detail, methods=["GET"])
         app.add_url_rule("/api/jobs/<job_id>/cancel", "job_cancel", self._job_cancel, methods=["POST"])
+        app.add_url_rule("/api/jobs/<job_id>/deps", "job_deps", self._job_deps, methods=["PUT"])
         app.add_url_rule("/api/jobs/<job_id>/tasks", "job_tasks", self._job_tasks, methods=["GET"])
         app.add_url_rule("/api/jobs/<job_id>/shards", "job_shards", self._job_shards, methods=["GET"])
         app.add_url_rule("/api/jobs/<job_id>/shuffle", "job_shuffle", self._job_shuffle, methods=["GET"])
@@ -161,6 +165,7 @@ class Master:
             "jobs_succeeded": sum(1 for j in jobs if j.status in (C.JOB_SUCCEEDED, C.JOB_REDUCE)),
             "jobs_failed": sum(1 for j in jobs if j.status == C.JOB_FAILED),
             "jobs_cancelled": sum(1 for j in jobs if j.status == C.JOB_CANCELLED),
+            "jobs_skipped": sum(1 for j in jobs if j.status == C.JOB_SKIPPED),
             "workers": self.registry.summary(),
             "config": self.config.to_dict(),
             "recent_jobs": [self.job_manager.job_summary(j) for j in jobs[:10]],
@@ -177,10 +182,12 @@ class Master:
             body = request.get_json(silent=True) or {}
             body["_defaults"] = self.config_manager.load_defaults().to_dict()
             try:
+                body["depends_on"] = self.deps.validate(None, body.get("depends_on"))
                 job = self.job_manager.submit(body)
             except (ValueError, KeyError) as exc:
                 return jsonify({"error": str(exc)}), 400
-            return jsonify(self.job_manager.job_summary(job)), 201
+            self.deps.evaluate()  # deps may already be satisfied -> start now
+            return jsonify(self.job_manager.job_summary(self.job_manager.get_job(job.job_id))), 201
         return jsonify({"jobs": [self.job_manager.job_summary(j) for j in self.job_manager.list_jobs()]})
 
     def _job_detail(self, job_id: str):
@@ -201,7 +208,33 @@ class Master:
             return err, code
         if not job.is_terminal:
             self.job_manager.cancel(job)
+            self.deps.evaluate()  # dependents of a cancelled job must skip now
         return jsonify(self.job_manager.job_summary(job))
+
+    def _job_deps(self, job_id: str):
+        """Replace a WAITING job's dependency set, then re-evaluate at once."""
+        job, err, code = self._get_job(job_id)
+        if job is None:
+            return err, code
+        if job.status != C.JOB_WAITING:
+            return jsonify({
+                "error": f"dependencies can only be modified while waiting "
+                         f"(job is {job.status})",
+            }), 409
+        body = request.get_json(silent=True) or {}
+        try:
+            deps = self.deps.validate(job_id, body.get("depends_on"))
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        before = list(job.depends_on)
+        self.job_manager.apply_job(job_id, lambda j: setattr(j, "depends_on", deps))
+        self.logbus.info(
+            job_id,
+            f"dependencies updated: [{', '.join(before)}] -> [{', '.join(deps)}]",
+            task_id="deps",
+        )
+        self.deps.evaluate()  # the edit may release or doom the job immediately
+        return jsonify(self.job_manager.job_summary(self.job_manager.get_job(job_id)))
 
     def _job_tasks(self, job_id: str):
         job, err, code = self._get_job(job_id)
